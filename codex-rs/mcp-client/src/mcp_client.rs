@@ -435,7 +435,7 @@ const DEFAULT_ENV_VARS: &[&str] = &[
 
 #[cfg(windows)]
 const DEFAULT_ENV_VARS: &[&str] = &[
-    // TODO: More research is necessary to curate this list.
+    // Core Windows environment variables needed for MCP servers
     "PATH",
     "PATHEXT",
     "USERNAME",
@@ -443,6 +443,12 @@ const DEFAULT_ENV_VARS: &[&str] = &[
     "USERPROFILE",
     "TEMP",
     "TMP",
+    // Application data paths - many programs rely on these
+    "APPDATA",
+    "LOCALAPPDATA",
+    // System paths - needed for finding installed programs and Windows components
+    "ProgramFiles",
+    "SystemRoot",
 ];
 
 /// `extra_env` comes from the config for an entry in `mcp_servers` in
