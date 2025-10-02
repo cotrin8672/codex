@@ -5,6 +5,7 @@
 #![deny(clippy::disallowed_methods)]
 use app::App;
 pub use app::AppExitInfo;
+use codex_app_server_protocol::AuthMode;
 use codex_core::AuthManager;
 use codex_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
 use codex_core::CodexAuth;
@@ -19,7 +20,7 @@ use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_ollama::DEFAULT_OSS_MODEL;
 use codex_protocol::config_types::SandboxMode;
-use codex_protocol::mcp_protocol::AuthMode;
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use tracing::error;
@@ -54,6 +55,7 @@ mod markdown_render;
 mod markdown_stream;
 pub mod onboarding;
 mod pager_overlay;
+pub mod public_widgets;
 mod render;
 mod resume_picker;
 mod session_log;
@@ -81,6 +83,9 @@ use crate::onboarding::onboarding_screen::OnboardingScreenArgs;
 use crate::onboarding::onboarding_screen::run_onboarding_app;
 use crate::tui::Tui;
 pub use cli::Cli;
+pub use markdown_render::render_markdown_text;
+pub use public_widgets::composer_input::ComposerAction;
+pub use public_widgets::composer_input::ComposerInput;
 
 // (tests access modules directly within the crate)
 
@@ -239,7 +244,29 @@ pub async fn run_main(
             .map_err(|e| std::io::Error::other(format!("OSS setup failed: {e}")))?;
     }
 
-    let _ = tracing_subscriber::registry().with(file_layer).try_init();
+    let otel = codex_core::otel_init::build_provider(&config, env!("CARGO_PKG_VERSION"));
+
+    #[allow(clippy::print_stderr)]
+    let otel = match otel {
+        Ok(otel) => otel,
+        Err(e) => {
+            eprintln!("Could not create otel exporter: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Some(provider) = otel.as_ref() {
+        let otel_layer = OpenTelemetryTracingBridge::new(&provider.logger).with_filter(
+            tracing_subscriber::filter::filter_fn(codex_core::otel_init::codex_export_filter),
+        );
+
+        let _ = tracing_subscriber::registry()
+            .with(file_layer)
+            .with(otel_layer)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::registry().with(file_layer).try_init();
+    };
 
     run_ratatui_app(cli, config, active_profile, should_show_trust_screen)
         .await
@@ -273,6 +300,8 @@ async fn run_ratatui_app(
     // within the TUI scrollback. Building spans keeps styling consistent.
     #[cfg(not(debug_assertions))]
     if let Some(latest_version) = updates::get_upgrade_version(&config) {
+        use crate::history_cell::padded_emoji;
+        use crate::history_cell::with_border_with_inner_width;
         use ratatui::style::Stylize as _;
         use ratatui::text::Line;
 
@@ -280,16 +309,27 @@ async fn run_ratatui_app(
         let exe = std::env::current_exe()?;
         let managed_by_npm = std::env::var_os("CODEX_MANAGED_BY_NPM").is_some();
 
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::from(vec![
-            "✨⬆️ Update available!".bold().cyan(),
-            " ".into(),
-            format!("{current_version} -> {latest_version}.").into(),
-        ]));
+        let mut content_lines: Vec<Line<'static>> = vec![
+            Line::from(vec![
+                padded_emoji("✨").bold().cyan(),
+                "Update available!".bold().cyan(),
+                " ".into(),
+                format!("{current_version} -> {latest_version}.").bold(),
+            ]),
+            Line::from(""),
+            Line::from("See full release notes:"),
+            Line::from(""),
+            Line::from(
+                "https://github.com/openai/codex/releases/latest"
+                    .cyan()
+                    .underlined(),
+            ),
+            Line::from(""),
+        ];
 
         if managed_by_npm {
             let npm_cmd = "npm install -g @openai/codex@latest";
-            lines.push(Line::from(vec![
+            content_lines.push(Line::from(vec![
                 "Run ".into(),
                 npm_cmd.cyan(),
                 " to update.".into(),
@@ -298,19 +338,22 @@ async fn run_ratatui_app(
             && (exe.starts_with("/opt/homebrew") || exe.starts_with("/usr/local"))
         {
             let brew_cmd = "brew upgrade codex";
-            lines.push(Line::from(vec![
+            content_lines.push(Line::from(vec![
                 "Run ".into(),
                 brew_cmd.cyan(),
                 " to update.".into(),
             ]));
         } else {
-            lines.push(Line::from(vec![
+            content_lines.push(Line::from(vec![
                 "See ".into(),
-                "https://github.com/openai/codex/releases/latest".cyan(),
-                " for the latest releases and installation options.".into(),
+                "https://github.com/openai/codex".cyan().underlined(),
+                " for installation options.".into(),
             ]));
         }
 
+        let viewport_width = tui.terminal.viewport_area.width as usize;
+        let inner_width = viewport_width.saturating_sub(4).max(1);
+        let mut lines = with_border_with_inner_width(content_lines, inner_width);
         lines.push("".into());
         tui.insert_history_lines(lines);
     }
